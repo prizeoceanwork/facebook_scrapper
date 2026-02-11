@@ -56,14 +56,14 @@ export default async function handler(req, res) {
       timeout: 30000,
     });
     
-    // Wait for page to load
-    await page.waitForTimeout(5000);
+    // ✅ FIX: Replace waitForTimeout with waitForSelector or setTimeout
+    console.log('Waiting for page to load...');
+    await new Promise(resolve => setTimeout(resolve, 5000));
     
     // 🔥 CLICK THE CROSS ICON TO CLOSE LOGIN MODAL 🔥
     try {
       console.log('Looking for close button...');
       
-      // Method 1: Click by the specific class you provided
       const closeButtonClicked = await page.evaluate(() => {
         // Find the cross icon with the specific classes
         const crossIcon = document.querySelector('i.x1b0d499.x1d69dk1');
@@ -79,6 +79,7 @@ export default async function handler(req, res) {
           ...document.querySelectorAll('svg[aria-label="Close"]'),
           ...document.querySelectorAll('div[role="button"] i'),
           ...document.querySelectorAll('.x1i10hfl.xjbqb8w'),
+          ...document.querySelectorAll('[aria-label="Dismiss"]'),
         ];
         
         for (const btn of possibleCloseButtons) {
@@ -92,21 +93,35 @@ export default async function handler(req, res) {
       
       if (closeButtonClicked) {
         console.log('✅ Close button clicked, waiting for modal to dismiss...');
-        await page.waitForTimeout(3000);
+        await new Promise(resolve => setTimeout(resolve, 3000));
       } else {
         console.log('❌ No close button found, continuing anyway...');
       }
       
     } catch (clickError) {
       console.log('Error clicking close button:', clickError.message);
-      // Continue anyway - the modal might not be present
     }
     
-    // Now extract the member count
-    console.log('Extracting member count...');
+    // Wait a bit more for content to load
+    await new Promise(resolve => setTimeout(resolve, 3000));
     
-    // Wait a bit more for content to load after closing modal
-    await page.waitForTimeout(3000);
+    // Check if we're on a login page
+    const currentUrl = page.url();
+    console.log('Current URL:', currentUrl);
+    
+    if (currentUrl.includes('login') || currentUrl.includes('checkpoint')) {
+      console.log('❌ Still on login page - IP may be blocked');
+      await browser.close();
+      return res.json({
+        totalMembers: 6500, // 🔴 DIFFERENT: 6.5K for IP blocked
+        formattedCount: '6.5K',
+        success: true,
+        fallback: true,
+        reason: 'ip_blocked'
+      });
+    }
+    
+    console.log('Extracting member count...');
     
     // Try multiple methods to get the member count
     let memberCount = null;
@@ -119,15 +134,18 @@ export default async function handler(req, res) {
         'div[role="main"] span',
         'a[href*="members"] span',
         'h2 span',
-        'div.x1i10hfl span'
+        'div.x1i10hfl span',
+        'span.html-span span',
+        'div[aria-label*="members"]',
+        'span[dir="auto"]'
       ];
       
       for (const selector of selectors) {
         const elements = document.querySelectorAll(selector);
         for (const el of elements) {
-          const text = el.innerText || '';
-          if (text.includes('members') || text.includes('Members')) {
-            const match = text.match(/([\d,\.]+[KkM]?)\s*members/i);
+          const text = el.innerText || el.textContent || '';
+          if (text.includes('members') || text.includes('Members') || text.includes('total members')) {
+            const match = text.match(/([0-9,\.]+[KkM]?)\s*members/i);
             if (match) return match[1];
           }
         }
@@ -139,7 +157,17 @@ export default async function handler(req, res) {
     if (!memberCount) {
       memberCount = await page.evaluate(() => {
         const bodyText = document.body.innerText;
-        const match = bodyText.match(/([\d,\.]+[KkM]?)\s*members/i);
+        console.log('Page text sample:', bodyText.substring(0, 200));
+        const match = bodyText.match(/([0-9,\.]+[KkM]?)\s*members/i);
+        return match ? match[1] : null;
+      });
+    }
+    
+    // Method 3: Try to find any number near the word "members"
+    if (!memberCount) {
+      memberCount = await page.evaluate(() => {
+        const html = document.body.innerHTML;
+        const match = html.match(/([0-9,\.]+[KkM]?)[^<>]*members/i);
         return match ? match[1] : null;
       });
     }
@@ -147,31 +175,37 @@ export default async function handler(req, res) {
     await browser.close();
     
     if (memberCount) {
+      console.log('✅ Found member count:', memberCount);
       const totalMembers = parseMemberCount(memberCount);
       
       // Sanity check - if it's suspiciously low, use fallback
       if (totalMembers < 1000) {
+        console.log('⚠️ Count too low, using fallback');
         return res.json({
-          totalMembers: 7300,
-          formattedCount: '7.3K',
+          totalMembers: 6600, // 🔴 DIFFERENT: 6.6K for count too low
+          formattedCount: '6.6K',
           success: true,
-          note: 'Used fallback due to suspicious low value'
+          fallback: true,
+          reason: 'count_too_low'
         });
       }
       
+      // ✅ SUCCESS - REAL SCRAPED VALUE
       return res.json({
         totalMembers,
         formattedCount: formatCount(totalMembers),
-        success: true
+        success: true,
+        scraped: true
       });
     }
     
-    // Final fallback
+    console.log('❌ No member count found, using fallback');
     return res.json({
-      totalMembers: 7300,
-      formattedCount: '7.3K',
+      totalMembers: 6700, // 🔴 DIFFERENT: 6.7K for no count found
+      formattedCount: '6.7K',
       success: true,
-      fallback: true
+      fallback: true,
+      reason: 'no_count_found'
     });
     
   } catch (error) {
@@ -182,21 +216,25 @@ export default async function handler(req, res) {
     }
     
     res.json({
-      totalMembers: 7300,
-      formattedCount: '7.3K',
+      totalMembers: 6800, // 🔴 DIFFERENT: 6.8K for error
+      formattedCount: '6.8K',
       success: true,
-      fallback: true
+      fallback: true,
+      error: error.message
     });
   }
 }
 
 function parseMemberCount(str) {
+  if (!str) return 7300;
+  const cleanStr = str.replace(/,/g, '');
   if (str.includes('K') || str.includes('k')) {
-    return Math.round(parseFloat(str.replace(/,/g, '')) * 1000);
+    return Math.round(parseFloat(cleanStr) * 1000);
   } else if (str.includes('M') || str.includes('m')) {
-    return Math.round(parseFloat(str.replace(/,/g, '')) * 1000000);
+    return Math.round(parseFloat(cleanStr) * 1000000);
   } else {
-    return parseInt(str.replace(/,/g, '')) || 7300;
+    const num = parseInt(cleanStr);
+    return isNaN(num) ? 7300 : num;
   }
 }
 
